@@ -5,21 +5,23 @@ const win = window.__TAURI__.window.getCurrentWindow();
 const $ = (id) => document.getElementById(id);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-const MESES = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ'];
 const MAX_TENTATIVAS = 7;
 const REPO_URL = 'https://github.com/hugomec7/MecDrive';
 
 const S = {
   info: null,
-  cfg: { base: '', transfers: 4, view: 'details', zoom: 1, openAfter: false },
+  cfg: { dest: '', transfers: 4, view: 'details', zoom: 1, openAfter: false },
   email: '',
   links: [], // { url, id, rk, kind: 'folder'|'file', name }
   files: [], // { l (índice do link), src, size, st, bytes, speed, err, path }
   dirs: [], // { l, path } — para mostrar também as pastas vazias
   off: new Set(), // índices de arquivos desmarcados
   closed: new Set(), // pastas recolhidas
-  dest: { mode: 'auto', date: '', auto: null, custom: '' },
-  opts: { sub: '', prefix: '', suffix: '', keepRoot: false, transfers: 4 },
+  dest: { custom: '' }, // pasta escolhida nesta sessão; vazia = a última usada (cfg.dest) ou Downloads\\MecDrive
+  dirRen: new Map(), // caminho da pasta na árvore -> novo nome
+  cwd: '', // pasta aberta no modo de navegar
+  opts: { sub: '', inner: '', prefix: '', suffix: '', keepRoot: false, transfers: 4 },
+  enc: null, // Mec Encoder neste PC: { installed, queueOnly, presets, defaultPreset }
   free: null,
   job: null,
   run: null,
@@ -220,8 +222,15 @@ const EMPTY_T = 'Cole um ou vários links do Google Drive';
 const EMPTY_P = 'A árvore de pastas aparece aqui com os tamanhos, para você escolher o que baixar. Os nomes e as subpastas ficam exatamente como estão no Drive.';
 
 async function readOne(p) {
-  const meta = await driveGet(`files/${p.id}?fields=id,name,mimeType,size&supportsAllDrives=true`, p.rk ? `${p.id}/${p.rk}` : '');
-  const link = { url: p.url, id: p.id, rk: p.rk, name: meta.name, kind: meta.mimeType === 'application/vnd.google-apps.folder' ? 'folder' : 'file' };
+  let meta = null;
+  try {
+    meta = await driveGet(`files/${p.id}?fields=id,name,mimeType,size&supportsAllDrives=true`, p.rk ? `${p.id}/${p.rk}` : '');
+  } catch (e) {
+    // a consulta do nome falhou (limite de chamadas do Google, por exemplo): se o rclone conseguir listar,
+    // é uma pasta e seguimos com um nome provisório em vez de recusar o link
+    if (/HTTP 404|notFound/i.test(String(e))) throw e;
+  }
+  const link = { url: p.url, id: p.id, rk: p.rk, name: meta ? meta.name : 'Pasta do Drive', kind: !meta || meta.mimeType === 'application/vnd.google-apps.folder' ? 'folder' : 'file' };
   let files, dirs = [];
   if (link.kind === 'folder') {
     const r = await rc('operations/list', { fs: srcFs(link), remote: '', opt: { recurse: true, noModTime: true } });
@@ -247,7 +256,7 @@ async function addLinks(text) {
   if (!fresh.length) return toast('Esse link já está na lista');
   setPhase('reading');
   if (!S.links.length) showEmpty('Lendo o link…', 'Buscando nomes, subpastas e tamanhos no Drive.', true);
-  const errors = [];
+  const errors = [], failed = [];
   for (let n = 0; n < fresh.length; n++) {
     setStatus('wait', fresh.length > 1 ? `Lendo link ${n + 1} de ${fresh.length}…` : 'Lendo o link…');
     try {
@@ -258,12 +267,13 @@ async function addLinks(text) {
       renderTree();
     } catch (e) {
       const msg = String(e);
+      failed.push(fresh[n].url);
       errors.push(/HTTP 404|notFound|not found/i.test(msg)
         ? 'O Drive não encontrou esse item para a conta conectada. Confira se o link é público ou se foi compartilhado com você.'
         : /[rR]ateLimit|HTTP 403/.test(msg) ? 'O Google recusou por limite de chamadas. Espere um minuto e tente de novo. (' + msg + ')' : msg);
     }
   }
-  $('iLink').value = '';
+  $('iLink').value = failed.join('  '); // o link que falhou fica no campo para tentar de novo
   setPhase('idle');
   if (S.links.length) renderTree();
   else showEmpty('Não consegui ler o link', errors[0] || '');
@@ -287,6 +297,8 @@ function keepOnly(keepFile, keepLink = () => true) {
   S.files = files;
   S.off = new Set(files.map((f, i) => (offKeys.has(f) ? i : -1)).filter((i) => i >= 0));
   S.closed = new Set();
+  S.cwd = '';
+  S.dirRen = new Map([...S.dirRen].filter(([k]) => map.has(Number(k.split('/')[0]))).map(([k, v]) => { const i = k.split('/')[0]; return [map.get(Number(i)) + k.slice(i.length), v]; }));
   if (S.links.length) renderTree();
   else showEmpty(EMPTY_T, EMPTY_P);
   refreshPreview();
@@ -309,8 +321,15 @@ function refreshClear() {
 }
 
 const treePath = (f) => `${f.l}/${f.src}`;
+const extOf = (n) => { const d = n.lastIndexOf('.'); return d > 0 ? n.slice(d) : ''; };
+const stemOf = (n) => { const d = n.lastIndexOf('.'); return d > 0 ? n.slice(0, d) : n; };
+const leafOf = (f) => f.src.slice(f.src.lastIndexOf('/') + 1);
+// nomes como vão ficar no disco: o que a pessoa renomeou na lista vale no lugar do nome do Drive
+const fileName = (f) => (f.rn ? f.rn + extOf(leafOf(f)) : leafOf(f));
+const dirName = (path, orig) => S.dirRen.get(path) || orig;
+
 function buildTree() {
-  const mk = (name, path, extra) => ({ name, path, dir: true, kids: new Map(), size: 0, files: [], ...extra });
+  const mk = (orig, path, extra) => ({ name: dirName(path, orig), orig, path, dir: true, kids: new Map(), size: 0, files: [], ...extra });
   const root = mk('', '');
   const linkNodes = S.links.map((l, i) => {
     if (l.kind !== 'folder') return null;
@@ -332,7 +351,7 @@ function buildTree() {
   S.dirs.forEach((d) => dirNode(d.l, d.path));
   S.files.forEach((f, i) => {
     const cut = f.src.lastIndexOf('/');
-    const node = { name: f.src.slice(cut + 1), dir: false, idx: i, size: f.size };
+    const node = { name: fileName(f), orig: leafOf(f), dir: false, idx: i, size: f.size };
     if (S.links[f.l].kind !== 'folder') root.kids.set('F' + i, { ...node, link: f.l });
     else dirNode(f.l, cut < 0 ? '' : f.src.slice(0, cut)).kids.set('\u0000' + f.src, node);
   });
@@ -354,7 +373,8 @@ const ICO_DOC = '<svg class="fic" viewBox="0 0 24 24" fill="none" stroke="curren
 const CB = '<svg class="ck" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 6.2l2.4 2.4 4.6-5"/></svg><svg class="ds" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h6"/></svg>';
 const CHEV = '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 1.5L7 5 3.5 8.5"/></svg>';
 const ICO_X = '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M2 2l6 6M8 2L2 8"/></svg>';
-const ICO_OPEN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5a1.5 1.5 0 0 1 1.5-1.5h2.3l1.4 1.7h5.3A1.5 1.5 0 0 1 14 6.700v4.800a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>';
+const ICO_OPEN = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5a1.5 1.5 0 0 1 1.5-1.5h2.3l1.4 1.7h5.3A1.5 1.5 0 0 1 14 6.7v4.8a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg>';
+const ICO_EDIT = '<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M10.5 3.2l2.300 2.300M3 13l.6-2.900 7.400-7.400a1.200 1.200 0 0 1 1.700 0l.6.6a1.200 1.200 0 0 1 0 1.700L5.900 12.400z"/></svg>';
 const isVideo = (n) => /\.(mov|mp4|mxf|avi|mkv|m4v|braw|r3d|mts|webm)$/i.test(n);
 const fileIco = (n) => (isVideo(n) ? ICO_FILE : ICO_DOC);
 
@@ -364,6 +384,18 @@ function checkState(idxs) {
   for (const i of idxs) if (!S.off.has(i)) on++;
   return on === 0 ? '' : on === idxs.length ? 'on' : 'mix';
 }
+function findNode(root, path) {
+  // devolve a pasta desse caminho e a trilha até ela
+  const trail = [];
+  let n = root;
+  while (n.path !== path) {
+    const next = [...n.kids.values()].find((k) => k.dir && (k.path === path || path.startsWith(k.path + '/')));
+    if (!next) return null;
+    trail.push(next);
+    n = next;
+  }
+  return { node: n, trail };
+}
 function renderTree() {
   if (!S.links.length) return;
   const root = buildTree();
@@ -371,59 +403,77 @@ function renderTree() {
   const scroll = el.scrollTop;
   const html = [];
   const view = S.cfg.view || 'details';
-  const rmBtn = (l) => (l != null ? `<button class="lx" data-rm="${l}" title="Tirar este link da lista">${ICO_X}</button>` : '');
+  const canRen = S.phase === 'idle' || S.phase === 'error';
+  const ren = (ok) => (ok && canRen ? 'data-name data-ren title="Clique para renomear"' : 'data-name');
+  const rmBtn = (l) => (l != null ? `<button class="hb lx" data-rm="${l}" title="Tirar este link da lista">${ICO_X}</button>` : '');
+  const tip = (k) => esc(k.name === k.orig ? k.name : `${k.name}  (no Drive: ${k.orig})`);
   const fileRow = (k, pad, sub) => `<div class="trow ${S.off.has(k.idx) ? 'off' : ''}" ${pad} data-file="${k.idx}">
       <span class="chev none"></span>
       <button class="cb ${S.off.has(k.idx) ? '' : 'on'}" data-chk>${CB}</button>${fileIco(k.name)}
-      <span class="nm" title="${esc(k.name)}">${esc(k.name)}${sub ? `<span class="pth">${esc(sub)}</span>` : ''}</span>
+      <span class="nm"><span ${ren(!isDone(S.files[k.idx]))}>${esc(k.name)}</span>${sub ? `<span class="pth">${esc(sub)}</span>` : ''}</span>
       <span class="stt" data-stt></span>
       <span class="sz">${fmtSize(k.size)}</span>${rmBtn(k.link)}</div>`;
   const dirRow = (k, pad, label, only) => {
     const open = !S.closed.has(k.path);
     const st = checkState(k.files);
-    return `<div class="trow dir ${k.link != null ? 'link' : ''} ${st ? '' : 'off'}" ${pad} data-dir="${esc(k.path)}" ${only ? 'data-only="1"' : ''}>
+    return `<div class="trow dir ${k.link != null ? 'link' : ''} ${st ? '' : 'off'}" ${pad} data-dir="${esc(k.path)}" data-orig="${esc(k.orig)}" data-cur="${esc(k.name)}" ${only ? 'data-only="1"' : ''}>
       <button class="chev ${open ? 'open' : ''} ${k.kids.size || only ? '' : 'none'}" data-tog>${CHEV}</button>
       <button class="cb ${st}" data-chk>${CB}</button>${k.link != null ? ICO_LINK : ICO_DIR}
-      <span class="nm" title="${esc(label)}">${esc(label)}</span>
+      <span class="nm"><span ${ren(true)}>${esc(label)}</span></span>
       ${k.files.some((i) => isDone(S.files[i]) && S.files[i].path) ? `<span class="stt"><button class="rv" data-revealdir title="Abrir esta pasta">${ICO_OPEN}</button></span>` : ''}
       <span class="sz">${k.files.length ? fmtSize(only ? only.size : k.size) : 'vazia'}</span>${rmBtn(k.link)}</div>`;
   };
-  const sorted = (n) => [...n.kids.values()].sort((a, b) => (a.link != null || b.link != null ? 0 : a.dir === b.dir ? natCmp(a.name, b.name) : a.dir ? -1 : 1));
+  const fileTile = (k) => `<div class="tile ${S.off.has(k.idx) ? 'off' : ''}" data-file="${k.idx}" title="${tip(k)}">
+    <div class="th">${fileIco(k.name)}<button class="cb ${S.off.has(k.idx) ? '' : 'on'}" data-chk>${CB}</button></div>
+    <div class="tn"><span ${ren(!isDone(S.files[k.idx]))}>${esc(k.name)}</span></div><div class="ts">${fmtSize(k.size)}</div><span class="stt" data-stt></span></div>`;
+  const dirTile = (k) => `<div class="tile ${checkState(k.files) ? '' : 'off'}" data-dir="${esc(k.path)}" data-orig="${esc(k.orig)}" data-cur="${esc(k.name)}" data-enter="1" title="${tip(k)}">
+    <div class="th">${k.link != null ? ICO_LINK : ICO_DIR}<button class="cb ${checkState(k.files)}" data-chk>${CB}</button></div>
+    <div class="tn"><span ${ren(true)}>${esc(k.name)}</span></div><div class="ts">${k.files.length ? `${plural(k.files.length, 'arquivo', 'arquivos')} · ${fmtSize(k.size)}` : 'vazia'}</div></div>`;
+  const byName = (a, b) => natCmp(a.name, b.name);
+  const sorted = (n) => [...n.kids.values()].sort((a, b) => (a.link != null || b.link != null ? 0 : a.dir === b.dir ? byName(a, b) : a.dir ? -1 : 1));
   if (view === 'details') {
     const walk = (n, depth) => {
       for (const k of sorted(n)) {
-        const pad = `style="padding-left:${6 + depth * 20}px"`;
+        const pad = `style="padding-left:${8 + depth * 20}px"`;
         if (k.dir) { html.push(dirRow(k, pad, k.name)); if (!S.closed.has(k.path)) walk(k, depth + 1); }
         else html.push(fileRow(k, pad));
       }
     };
     walk(root, 0);
+  } else if (view === 'browse') {
+    // navegar como no Drive: uma pasta por vez, clique para entrar, trilha para voltar
+    let found = S.cwd ? findNode(root, S.cwd) : null;
+    if (!found) { S.cwd = ''; found = { node: root, trail: [] }; }
+    const crumbs = [{ path: '', name: 'Início' }, ...found.trail.map((t) => ({ path: t.path, name: t.name }))];
+    html.push(`<div class="crumbs">${crumbs.map((c, i) => `<button data-cwd="${esc(c.path)}" class="${i === crumbs.length - 1 ? 'cur' : ''}">${esc(c.name)}</button>`).join('<i>›</i>')}</div>`);
+    const kids = sorted(found.node);
+    html.push(kids.length ? `<div class="tiles flat">${kids.map((k) => (k.dir ? dirTile(k) : fileTile(k))).join('')}</div>` : '<div class="nothing">Pasta vazia</div>');
   } else {
     // lista e grade: por link, as pastas viram cabeçalhos com o caminho completo
     for (const top of sorted(root)) {
       if (!top.dir) {
-        html.push(view === 'list' ? fileRow(top, '') : `<div class="tiles flat">${tile(top.idx)}</div>`);
+        html.push(view === 'list' ? fileRow(top, '') : `<div class="tiles flat">${fileTile(top)}</div>`);
         continue;
       }
       html.push(dirRow(top, '', top.name));
       if (S.closed.has(top.path)) continue;
       const groups = [];
       const collect = (n, label) => {
-        const own = [...n.kids.values()].filter((k) => !k.dir).sort((a, b) => natCmp(a.name, b.name));
+        const own = [...n.kids.values()].filter((k) => !k.dir).sort(byName);
         if (own.length) groups.push({ node: n, label, own });
-        [...n.kids.values()].filter((k) => k.dir).sort((a, b) => natCmp(a.name, b.name)).forEach((k) => collect(k, label ? label + ' › ' + k.name : k.name));
+        [...n.kids.values()].filter((k) => k.dir).sort(byName).forEach((k) => collect(k, label ? label + ' › ' + k.name : k.name));
       };
       collect(top, '');
       for (const g of groups) {
         if (view === 'list') {
-          g.own.forEach((k) => html.push(fileRow(k, 'style="padding-left:26px"', g.label)));
+          g.own.forEach((k) => html.push(fileRow(k, 'style="padding-left:28px"', g.label)));
         } else {
           const open = !S.closed.has(g.node.path) || g.node === top;
           if (g.node !== top) {
             const idxs = g.own.map((k) => k.idx);
-            html.push(dirRow({ ...g.node, files: idxs }, 'style="padding-left:26px"', g.label, { size: g.own.reduce((a, k) => a + Math.max(0, k.size), 0) }));
+            html.push(dirRow({ ...g.node, files: idxs }, 'style="padding-left:28px"', g.label, { size: g.own.reduce((a, k) => a + Math.max(0, k.size), 0) }));
           }
-          if (open) html.push(`<div class="tiles">${g.own.map((k) => tile(k.idx)).join('')}</div>`);
+          if (open) html.push(`<div class="tiles">${g.own.map(fileTile).join('')}</div>`);
         }
       }
     }
@@ -437,15 +487,8 @@ function renderTree() {
   $('treeHead').classList.remove('hide');
   el.classList.remove('hide');
   el.scrollTop = scroll;
-  $('treeName').textContent = S.links.length === 1 ? S.links[0].name : `${S.links.length} links`;
+  $('treeName').textContent = S.links.length === 1 ? dirName('0', S.links[0].name) : `${S.links.length} links`;
   refreshSummary();
-}
-function tile(i) {
-  const f = S.files[i];
-  const name = f.src.slice(f.src.lastIndexOf('/') + 1);
-  return `<div class="tile ${S.off.has(i) ? 'off' : ''}" data-file="${i}" title="${esc(name)}">
-    <div class="th">${fileIco(name)}<button class="cb ${S.off.has(i) ? '' : 'on'}" data-chk>${CB}</button></div>
-    <div class="tn">${esc(name)}</div><div class="ts">${fmtSize(f.size)}</div><span class="stt" data-stt></span></div>`;
 }
 function refreshSummary() {
   const sel = S.files.filter((_, i) => !S.off.has(i));
@@ -492,7 +535,54 @@ function paintRow(i) {
   }
 }
 
+/** Renomear na própria linha: vale só para o nome no disco, o Drive não é alterado. */
+function startRename(row) {
+  const holder = row.querySelector('[data-name]');
+  if (!holder || holder.querySelector('input')) return;
+  const isDir = row.dataset.dir != null;
+  const f = isDir ? null : S.files[Number(row.dataset.file)];
+  const input = document.createElement('input');
+  input.className = 'rn';
+  input.spellcheck = false;
+  input.value = isDir ? row.dataset.cur : stemOf(fileName(f));
+  holder.textContent = '';
+  holder.appendChild(input);
+  input.focus();
+  input.select();
+  let closed = false;
+  const finish = (save) => {
+    if (closed) return;
+    closed = true;
+    const v = cleanSeg(input.value.trim());
+    if (save && input.value.trim()) {
+      if (isDir) {
+        const path = row.dataset.dir;
+        v === row.dataset.orig ? S.dirRen.delete(path) : S.dirRen.set(path, v);
+        if (!path.includes('/') && S.dirRen.has(path) && !S.opts.keepRoot) {
+          // o nome da pasta do link só aparece no disco se ela for mantida
+          S.opts.keepRoot = true;
+          $('swRoot').classList.add('on');
+          toast('Liguei “Manter a pasta raiz do link” para usar esse nome');
+        }
+      } else {
+        f.rn = v === stemOf(leafOf(f)) ? undefined : v;
+      }
+    }
+    renderTree();
+    refreshPreview();
+  };
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') finish(true);
+    if (e.key === 'Escape') finish(false);
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
 $('tree').addEventListener('click', (e) => {
+  if (e.target.closest('.rn')) return;
+  const crumb = e.target.closest('[data-cwd]');
+  if (crumb) { S.cwd = crumb.dataset.cwd; return swapTree(); }
   const rm = e.target.closest('[data-rm]');
   if (rm) {
     if (!canEdit()) return;
@@ -502,6 +592,7 @@ $('tree').addEventListener('click', (e) => {
   }
   const row = e.target.closest('[data-file],[data-dir]');
   if (!row) return;
+  if (e.target.closest('[data-ren]')) return startRename(row);
   if (e.target.closest('[data-reveal]')) {
     const f = S.files[Number(row.dataset.file)];
     if (f && f.path) invoke('reveal', { path: f.path }).catch((err) => toast(String(err)));
@@ -525,6 +616,9 @@ $('tree').addEventListener('click', (e) => {
       const idxs = S.files.map((f, i) => (inDir(f) ? i : -1)).filter((i) => i >= 0);
       const turnOff = checkState(idxs) === 'on';
       idxs.forEach((i) => (turnOff ? S.off.add(i) : S.off.delete(i)));
+    } else if (row.dataset.enter) {
+      S.cwd = path;
+      return swapTree();
     } else {
       S.closed.has(path) ? S.closed.delete(path) : S.closed.add(path);
     }
@@ -562,59 +656,30 @@ function zoomStep() {
   $('zLbl').textContent = Math.round(S.cfg.zoom * 100) + '%';
   zRaf = zCur === S.cfg.zoom ? 0 : requestAnimationFrame(zoomStep);
 }
+/** Troca o conteúdo da lista com uma transição curta (mudar de modo, entrar ou sair de uma pasta). */
+function swapTree() {
+  $('tree').scrollTop = 0;
+  if (document.startViewTransition) document.startViewTransition(() => renderTree());
+  else renderTree();
+}
 function setView(v) {
   if (S.cfg.view === v) return;
   S.cfg.view = v;
   saveCfg();
-  if (document.startViewTransition) document.startViewTransition(() => renderTree());
-  else renderTree();
+  swapTree();
 }
 
-/* ---------------- destino ---------------- */
-function todayStr() {
-  const d = new Date();
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
-}
-async function computeAuto() {
-  if (!S.cfg.base) {
-    // sem pasta base configurada não há padrão por data: o destino é a pasta de downloads
-    S.dest.auto = null;
-    if (S.dest.mode !== 'custom' || !S.dest.custom) { S.dest.mode = 'custom'; S.dest.custom = (S.info && S.info.downloads) || ''; }
-    return renderDest();
-  }
-  const [y, m, d] = (S.dest.date || todayStr()).split('-');
-  const base = S.cfg.base.replace(/[\\/]+$/, '');
-  const mon = MESES[Number(m) - 1];
-  const numbered = (names) => names.map((n) => n.match(/^(\d+)\.\s*(.+?)\s*$/)).filter(Boolean);
-  const next = (list) => list.reduce((a, x) => Math.max(a, Number(x[1])), 0) + 1;
-  const months = numbered(await invoke('list_dirs', { path: `${base}\\${y}` }));
-  const mHit = months.find((x) => x[2].toUpperCase() === mon);
-  const monthName = mHit ? mHit[0].trim() : `${next(months)}. ${mon}`;
-  const tag = `${m}-${d}-${y.slice(2)}`;
-  const days = mHit ? numbered(await invoke('list_dirs', { path: `${base}\\${y}\\${monthName}` })) : [];
-  const dHit = days.find((x) => x[2] === tag);
-  const dayName = dHit ? dHit[0].trim() : `${next(days)}. ${tag}`;
-  S.dest.auto = { base, year: y, monthName, monthNew: !mHit, dayName, dayNew: !dHit, path: [base, y, monthName, dayName, 'RAW'].join('\\') };
-  renderDest();
-}
+/* ---------------- salvar em ---------------- */
+const defaultDest = () => S.cfg.dest || (S.info && S.info.downloads) || '';
+const destRoot = () => S.dest.custom || defaultDest();
 function finalBase() {
-  const root = S.dest.mode === 'custom' ? S.dest.custom : S.dest.auto && S.dest.auto.path;
+  const root = destRoot();
   if (!root) return '';
   return S.opts.sub ? root + '\\' + S.opts.sub : root;
 }
 const wb = (p) => esc(p).replace(/\\/g, '\\<wbr>');
 function renderDest() {
-  const el = $('destPath');
-  const sub = S.opts.sub ? `\\<wbr><b>${esc(S.opts.sub)}</b>` : '';
-  $('rowDate').classList.toggle('hide', S.dest.mode === 'custom');
-  $('bAuto').disabled = S.dest.mode !== 'custom' || !S.cfg.base;
-  if (S.dest.mode === 'custom') {
-    el.innerHTML = `${wb(S.dest.custom)}${sub}<span class="tag custom">${!S.cfg.base && S.info && S.dest.custom === S.info.downloads ? 'pasta de downloads' : 'pasta escolhida'}</span>`;
-  } else if (S.dest.auto) {
-    const a = S.dest.auto;
-    el.innerHTML = `${wb(a.base)}\\<wbr>${a.year}\\<wbr><span class="${a.monthNew ? 'new' : ''}" style="white-space:nowrap">${esc(a.monthName)}</span>\\<wbr><b class="${a.dayNew ? 'new' : ''}" style="white-space:nowrap">${esc(a.dayName)}</b>\\<wbr>RAW${sub}` +
-      (a.dayNew ? '<span class="tag">pasta nova</span>' : '<span class="tag old">já existe, usa a mesma</span>');
-  }
+  $('destPath').innerHTML = wb(destRoot()) + (S.opts.sub ? `\\<wbr><b>${esc(S.opts.sub)}</b>` : '');
   refreshGo();
   refreshFree();
 }
@@ -630,9 +695,9 @@ function paintFree() {
   if (S.free == null || !base) { el.textContent = base ? 'Não consegui medir o espaço desse disco' : ''; return; }
   const disk = /^[A-Za-z]:/.test(base) ? base.slice(0, 2).toUpperCase() : 'no destino';
   const need = S.files.reduce((a, f, i) => a + (S.off.has(i) || isDone(f) ? 0 : Math.max(0, f.size)), 0);
-  if (!need) el.innerHTML = `<b class="ok">${fmtSize(S.free)}</b> livres em ${disk}`;
-  else if (need > S.free) el.innerHTML = `<span class="bad">Não cabe em ${disk}: faltam ${fmtSize(need - S.free)}</span><br>livre ${fmtSize(S.free)} · precisa ${fmtSize(need)}`;
-  else el.innerHTML = `<b class="ok">${fmtSize(S.free)}</b> livres em ${disk}<br>precisa ${fmtSize(need)} · sobram ${fmtSize(S.free - need)}`;
+  if (!need) el.innerHTML = `<b>${fmtSize(S.free)}</b> livres em ${disk}`;
+  else if (need > S.free) el.innerHTML = `<span class="bad">Não cabe em ${disk}: faltam ${fmtSize(need - S.free)}</span><i>·</i>livre ${fmtSize(S.free)}<i>·</i>precisa ${fmtSize(need)}`;
+  else el.innerHTML = `<b>${fmtSize(S.free)}</b> livres em ${disk}<i>·</i>este download usa ${fmtSize(need)}<i>·</i>sobram ${fmtSize(S.free - need)}`;
 }
 
 /* ---------------- opções ---------------- */
@@ -644,14 +709,18 @@ function rename(name) {
 }
 function dstRel(f) {
   const link = S.links[f.l];
-  const cut = f.src.lastIndexOf('/');
-  const dir = cut < 0 ? '' : f.src.slice(0, cut + 1);
-  const root = link.kind === 'folder' && S.opts.keepRoot ? cleanSeg(link.name) + '/' : '';
-  return root + winTrim(dir + rename(f.src.slice(cut + 1)));
+  const parts = f.src.split('/');
+  parts.pop();
+  let acc = String(f.l);
+  const dirs = parts.map((seg) => { acc += '/' + seg; return cleanSeg(dirName(acc, seg)); });
+  const root = link.kind === 'folder' && S.opts.keepRoot ? [cleanSeg(dirName(String(f.l), link.name))] : [];
+  // subpasta dentro da raiz: fica entre a pasta do link e o conteúdo dela
+  const inner = link.kind === 'folder' && S.opts.inner ? S.opts.inner.split('\\') : [];
+  return [...root, ...inner, ...dirs, cleanSeg(rename(fileName(f)))].join('/');
 }
 function refreshPreview() {
   const f = S.files.find((_, k) => !S.off.has(k));
-  const leaf = f ? f.src.slice(f.src.lastIndexOf('/') + 1) : 'IMG_3558.MOV';
+  const leaf = f ? fileName(f) : 'IMG_0001.MOV';
   const el = $('preview');
   if (S.opts.prefix || S.opts.suffix) el.innerHTML = `Prévia: ${esc(leaf)} → <b>${esc(rename(leaf))}</b>`;
   else el.textContent = 'Os nomes ficam como estão no Drive. O sufixo entra antes da extensão.';
@@ -660,13 +729,16 @@ function refreshPreview() {
 function bindOpts() {
   const upd = () => {
     S.opts.sub = cleanSub($('iSub').value);
+    S.opts.inner = cleanSub($('iInner').value);
     S.opts.prefix = cleanName($('iPre').value);
     S.opts.suffix = cleanName($('iSuf').value);
     renderDest();
     refreshPreview();
   };
-  ['iSub', 'iPre', 'iSuf'].forEach((id) => ($(id).oninput = upd));
+  ['iSub', 'iInner', 'iPre', 'iSuf'].forEach((id) => ($(id).oninput = upd));
   $('swRoot').onclick = () => { S.opts.keepRoot = !S.opts.keepRoot; $('swRoot').classList.toggle('on', S.opts.keepRoot); refreshPreview(); };
+  $('swEnc').onclick = () => { S.cfg.encSend = !S.cfg.encSend; $('swEnc').classList.toggle('on', S.cfg.encSend); $('rowEncPreset').classList.toggle('hide', !S.cfg.encSend); saveCfg(); };
+  $('selEnc').onchange = () => { S.cfg.encPreset = $('selEnc').value; saveCfg(); };
   $('swOpen').onclick = () => { S.cfg.openAfter = !S.cfg.openAfter; $('swOpen').classList.toggle('on', S.cfg.openAfter); saveCfg(); };
   const setN = (n) => { S.opts.transfers = Math.max(1, Math.min(8, n)); $('nTransfers').textContent = S.opts.transfers; S.cfg.transfers = S.opts.transfers; saveCfg(); };
   $('bLess').onclick = () => setN(S.opts.transfers - 1);
@@ -695,7 +767,6 @@ $('hList').addEventListener('click', (e) => {
   const h = S.history[Number(r.dataset.h)];
   closeSheets();
   resetAll();
-  S.dest.mode = 'custom';
   S.dest.custom = h.root || h.dest;
   if (h.opts) applyOpts(h.opts);
   renderDest();
@@ -703,7 +774,7 @@ $('hList').addEventListener('click', (e) => {
 });
 function applyOpts(o) {
   Object.assign(S.opts, o);
-  $('iSub').value = S.opts.sub; $('iPre').value = S.opts.prefix; $('iSuf').value = S.opts.suffix;
+  $('iSub').value = S.opts.sub; $('iInner').value = S.opts.inner || ''; $('iPre').value = S.opts.prefix; $('iSuf').value = S.opts.suffix;
   $('swRoot').classList.toggle('on', S.opts.keepRoot);
   $('nTransfers').textContent = S.opts.transfers;
 }
@@ -720,9 +791,9 @@ async function startDownload(resume) {
     const picked = S.files.map((f, i) => ({ f, i })).filter((x) => !S.off.has(x.i) && !isDone(x.f));
     if (!picked.length) return;
     job = {
-      v: 2, id: Date.now(), links: S.links, base, root: S.dest.mode === 'custom' ? S.dest.custom : S.dest.auto.path,
+      v: 2, id: Date.now(), links: S.links, base, root: destRoot(),
       opts: { ...S.opts }, state: 'running', when: new Date().toISOString(),
-      dirs: S.dirs, all: S.files.map((f) => ({ l: f.l, src: f.src, size: f.size })), off: [...S.off],
+      dirs: S.dirs, all: S.files.map((f) => ({ l: f.l, src: f.src, size: f.size, rn: f.rn })), off: [...S.off], dirRen: [...S.dirRen],
       items: picked.map((x) => ({ i: x.i, dst: dstRel(x.f) })),
     };
     // dois itens do Drive nunca podem cair no mesmo arquivo do disco
@@ -924,6 +995,14 @@ async function finish() {
   invoke('notify', { title: errors ? 'MecDrive: terminou com erros' : 'MecDrive: download concluído', body: `${job.links.map((l) => l.name).join(', ')}\n${parts.join(' · ')}` });
   invoke('alerta', { color: errors || conflict ? 'red' : 'green' });
   if (S.cfg.openAfter && done) invoke('open_folder', { path: job.base });
+  if (S.cfg.encSend && S.enc && S.enc.installed && S.enc.queueOnly) {
+    const videos = job.items.map((it) => S.files[it.i]).filter((f) => f.st === 'done' && f.path && isVideo(f.path)).map((f) => f.path);
+    if (videos.length) {
+      invoke('mecenc_send', { files: videos, preset: S.cfg.encPreset || S.enc.defaultPreset || 'RAW' })
+        .then(() => toast(`${plural(videos.length, 'vídeo adicionado', 'vídeos adicionados')} à fila do Mec Encoder`, 4000))
+        .catch((e) => toast('Mec Encoder: ' + e, 5000));
+    }
+  }
 }
 function explain(err) {
   err = String(err || '');
@@ -990,13 +1069,13 @@ async function cancelDownload() {
 }
 
 function resetAll() {
-  S.links = []; S.files = []; S.dirs = []; S.off = new Set(); S.closed = new Set(); S.job = null; S.run = null;
+  S.links = []; S.files = []; S.dirs = []; S.off = new Set(); S.closed = new Set(); S.dirRen = new Map(); S.cwd = ''; S.job = null; S.run = null;
   $('iLink').value = '';
   $('prog').classList.remove('show');
   showEmpty(EMPTY_T, EMPTY_P);
-  S.dest.mode = 'auto'; S.dest.custom = ''; S.dest.date = todayStr(); $('iDate').value = S.dest.date;
+  S.dest.custom = '';
   setPhase('idle');
-  computeAuto();
+  renderDest();
 }
 
 /** Ao abrir: se o app fechou no meio de um download, continua de onde parou. */
@@ -1007,9 +1086,9 @@ async function restoreJob() {
   S.links = job.links;
   S.dirs = job.dirs || [];
   S.files = job.all.map((f) => ({ ...f }));
+  S.dirRen = new Map(job.dirRen || []);
   S.off = new Set(job.off || []);
   applyOpts(job.opts);
-  S.dest.mode = 'custom';
   S.dest.custom = job.root;
   renderDest();
   renderTree();
@@ -1058,7 +1137,7 @@ async function init() {
   document.addEventListener('click', () => setMenu(false));
   $('mCheck').onclick = () => checkUpdate(true);
   $('bHistory').onclick = () => { renderHistory(); openSheet('shHistory'); };
-  $('bSettings').onclick = () => { $('basePath').textContent = S.cfg.base || 'nenhuma (o destino é a pasta de downloads)'; openSheet('shSettings'); };
+  $('bSettings').onclick = () => openSheet('shSettings');
   $('bAbout').onclick = () => openSheet('shAbout');
   $('bRepo').onclick = () => invoke('open_url', { url: REPO_URL }).catch((e) => toast(String(e)));
   $('repoTxt').value = REPO_URL.replace('https://', '');
@@ -1080,11 +1159,6 @@ async function init() {
       await connect();
     } else login();
   };
-  $('bBase').onclick = async () => {
-    const p = await invoke('pick_folder', { start: S.cfg.base });
-    if (!p) return;
-    S.cfg.base = p; $('basePath').textContent = p; saveCfg(); S.dest.mode = 'auto'; computeAuto();
-  };
   $('bAppDir').onclick = () => invoke('open_folder', { path: S.info.root });
   $('bCheck').onclick = () => checkUpdate(true);
   $('bUpdate').onclick = () => S.update && invoke('open_url', { url: S.update.url }).catch((e) => toast(String(e)));
@@ -1099,13 +1173,14 @@ async function init() {
     $('iLink').value = splitLinks(text).join('  ');
     addLinks(text);
   });
-  $('iDate').onchange = () => { S.dest.date = $('iDate').value || todayStr(); computeAuto(); };
   $('bPick').onclick = async () => {
-    const p = await invoke('pick_folder', { start: S.dest.mode === 'custom' ? S.dest.custom : S.cfg.base });
+    const p = await invoke('pick_folder', { start: destRoot() });
     if (!p) return;
-    S.dest.mode = 'custom'; S.dest.custom = p.replace(/[\\/]+$/, ''); renderDest();
+    // a pasta escolhida passa a ser a padrão das próximas vezes
+    S.dest.custom = S.cfg.dest = p.replace(/[\\/]+$/, '');
+    saveCfg();
+    renderDest();
   };
-  $('bAuto').onclick = () => { S.dest.mode = 'auto'; computeAuto(); };
   $('bOpenDest').onclick = () => invoke('open_folder', { path: finalBase() }).catch((e) => toast(String(e)));
   bindOpts();
 
@@ -1140,12 +1215,22 @@ async function init() {
   $('tree').style.zoom = zCur;
   $('zLbl').textContent = Math.round(zCur * 100) + '%';
   $('swOpen').classList.toggle('on', !!S.cfg.openAfter);
+  // a opção só aparece em quem tem um Mec Encoder que sabe enfileirar sem converter
+  S.enc = await invoke('mecenc_info').catch(() => null);
+  const hasEnc = !!(S.enc && S.enc.installed && S.enc.queueOnly && S.enc.presets.length);
+  $('rowEnc').classList.toggle('hide', !hasEnc);
+  if (hasEnc) {
+    if (!S.enc.presets.includes(S.cfg.encPreset)) S.cfg.encPreset = S.enc.presets.includes(S.enc.defaultPreset) ? S.enc.defaultPreset : S.enc.presets[0];
+    $('selEnc').innerHTML = S.enc.presets.map((n) => `<option ${n === S.cfg.encPreset ? 'selected' : ''}>${esc(n)}</option>`).join('');
+    $('swEnc').classList.toggle('on', !!S.cfg.encSend);
+    $('rowEncPreset').classList.toggle('hide', !S.cfg.encSend);
+  } else {
+    $('rowEncPreset').classList.add('hide');
+  }
   S.opts.transfers = S.cfg.transfers || 4;
   $('nTransfers').textContent = S.opts.transfers;
   S.history = ((await invoke('read_json', { name: 'history' })) || []).filter((h) => Array.isArray(h.links));
-  S.dest.date = todayStr();
-  $('iDate').value = S.dest.date;
-  await computeAuto();
+  renderDest();
   setPhase('idle');
   try {
     await connect();
@@ -1156,5 +1241,5 @@ async function init() {
   checkUpdate(false);
   setInterval(() => checkUpdate(false), 6 * 3600 * 1000);
 }
-Object.assign(window.DD, { addLinks, startDownload, togglePause, cancelDownload, stopJobs, renderDest, computeAuto, resetAll, setZoom, setView, clearDownloaded });
+Object.assign(window.DD, { addLinks, startDownload, togglePause, cancelDownload, stopJobs, renderDest, resetAll, setZoom, setView, clearDownloaded });
 init();

@@ -24,11 +24,13 @@ No primeiro uso o app pede login no Google. O login é feito pelo rclone no seu 
 - Aceita um ou vários links (pasta ou arquivo), mostra a árvore com os tamanhos e você marca o que quer
 - Nunca sobrescreve nem apaga nada no destino: arquivo com o mesmo tamanho é pulado, com tamanho diferente é avisado e não é tocado
 - Continua de onde parou se o app fechar ou a conexão cair
+- Quatro modos de ver o conteúdo: árvore, lista, grade e navegar por pastas como no Drive
+- Renomear pastas e arquivos na própria lista antes de baixar (muda só o nome no disco)
 - Subpasta, prefixo e sufixo nos nomes, manter ou não a pasta raiz do link, downloads simultâneos
+- Opcional, para quem usa o Mec Encoder 0.3.12 ou mais novo: adiciona os vídeos baixados à fila dele ao concluir, sem converter
 - Troca caracteres que o Windows não aceita em nomes (uma pasta `11/22/26` vira `11-22-26`)
 - Mostra o espaço livre do disco de destino antes de baixar
 - Progresso por arquivo e geral, pausar, cancelar, histórico, aviso de versão nova
-- Opcional: sugere a pasta do dia no padrão `<base>\<ano>\<n>. <MÊS>\<n>. MM-DD-AA\RAW`, olhando as pastas que já existem
 
 ## Pelo terminal
 

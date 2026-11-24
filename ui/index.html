@@ -109,10 +109,6 @@ main{flex:1;display:grid;grid-template-columns:360px minmax(0,1fr);gap:16px;padd
 .path .new{color:var(--green)}
 .tag{display:block;margin-top:4px;font-family:var(--font);font-size:12px;color:var(--green)}
 .tag.old,.tag.custom{color:var(--text-3)}
-.free-row{padding-top:8px;padding-bottom:8px;line-height:1.5;font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums}
-.free-row span{flex:1;min-width:0}
-.free-row .bad{color:var(--red);font-weight:500}
-.free-row .ok{color:var(--text);font-weight:500}
 
 .switch{width:36px;height:20px;border-radius:10px;background:var(--s3);position:relative;flex:none;margin-left:auto;transition:background var(--t2) var(--ease)}
 .switch::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#fff;transition:transform var(--t2) var(--ease)}
@@ -188,11 +184,39 @@ main{flex:1;display:grid;grid-template-columns:360px minmax(0,1fr);gap:16px;padd
 .rv{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--text-2);flex:none;transition:background var(--t1) var(--ease),color var(--t1) var(--ease)}
 .rv:hover{background:var(--s3);color:var(--text)}
 .rv svg{width:16px;height:16px}
-.lx{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--text-3);flex:none;opacity:0;transition:opacity var(--t1) var(--ease),background var(--t1) var(--ease),color var(--t1) var(--ease)}
-.trow:hover .lx{opacity:1}
-.lx:hover{background:var(--s3);color:var(--red)}
-.lx svg{width:10px;height:10px}
-
+/* salvar em, rodapé da lista, navegar por pastas, renomear */
+.save-row{align-items:center;padding-top:8px;padding-bottom:8px;gap:8px}
+.save-t{flex:1;min-width:0}
+.save-k{font-size:13px;font-weight:600}
+.save-row .path{padding:4px 0 0}
+.link-btn{font-size:13px;font-weight:500;color:var(--accent-ink);padding:4px;border-radius:6px;flex:none;transition:color var(--t1) var(--ease)}
+.link-btn:hover{color:var(--text)}
+.tree-foot{display:flex;align-items:center;gap:8px;height:36px;padding:0 16px;flex:none;box-shadow:0 1px 0 var(--line) inset;font-size:12px;color:var(--text-2);font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden}
+.tree-foot svg{width:16px;height:16px;color:var(--text-3);flex:none}
+.tree-foot b{color:var(--text);font-weight:500}
+.tree-foot i{font-style:normal;color:var(--text-3);margin:0 8px}
+.tree-foot .bad{color:var(--red);font-weight:500}
+.crumbs{display:flex;align-items:center;flex-wrap:wrap;gap:4px;padding:4px 8px 12px;font-size:13px}
+.crumbs button{height:24px;padding:0 8px;border-radius:6px;color:var(--text-2);transition:background var(--t1) var(--ease),color var(--t1) var(--ease)}
+.crumbs button:hover{background:var(--s2);color:var(--text)}
+.crumbs button.cur{color:var(--text);font-weight:500}
+.crumbs i{font-style:normal;color:var(--text-3)}
+.nothing{padding:32px;text-align:center;color:var(--text-3);font-size:13px}
+.hb{width:24px;height:24px;border-radius:6px;display:grid;place-items:center;color:var(--text-3);flex:none;opacity:0;transition:opacity var(--t1) var(--ease),background var(--t1) var(--ease),color var(--t1) var(--ease)}
+.hb svg{width:14px;height:14px}
+.trow:hover .hb,.tile:hover .hb,.hb:focus-visible{opacity:1}
+.hb:hover{background:var(--s3);color:var(--text)}
+.hb.lx svg{width:10px;height:10px}
+.hb.lx:hover{color:var(--red)}
+.th .hb{position:absolute;top:4px;right:4px}
+[data-ren]{cursor:text;border-radius:4px;transition:background var(--t1) var(--ease)}
+[data-ren]:hover{background:var(--s3);box-shadow:0 0 0 2px var(--s3)}
+.row select{margin-left:auto;height:28px;padding:0 8px;border-radius:8px;border:0;background:var(--s2);color:var(--text);font:inherit;font-size:13px;outline:0}
+.row select option{background:#1D1D20}
+.rn{width:100%;height:24px;padding:0 8px;border-radius:6px;border:0;outline:1px solid var(--accent-ink);background:rgba(0,0,0,.4);font:inherit;font-weight:400;color:var(--text)}
+.nm:has(.rn){overflow:visible}
+[data-name]:has(.rn){display:block;flex:1}
+.tile[data-enter] .th .fic{color:var(--text-2)}
 .pill-btn{height:28px;padding:0 12px;border-radius:8px;background:var(--s2);font-size:12px;font-weight:500;color:var(--text-2);flex:none;transition:background var(--t1) var(--ease),color var(--t1) var(--ease)}
 .pill-btn:hover{background:var(--s3);color:var(--text)}
 .vseg{display:flex;background:var(--s2);border-radius:8px;padding:2px;flex:none}
@@ -249,9 +273,10 @@ main{flex:1;display:grid;grid-template-columns:360px minmax(0,1fr);gap:16px;padd
 
 /* ---------- folhas ---------- */
 .backdrop{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.5);opacity:0;pointer-events:none;transition:opacity var(--t3) var(--ease)}
-.sheet{position:fixed;left:50%;width:min(540px,calc(100% - 48px));bottom:0;top:64px;z-index:21;background:#19191C;border-radius:16px 16px 0 0;
-  box-shadow:0 0 0 1px var(--line) inset,0 -16px 48px rgba(0,0,0,.5);transform:translate(-50%,104%);transition:transform var(--t3) var(--ease);display:flex;flex-direction:column}
-.sheet.open{transform:translate(-50%,0)}
+.sheet{position:fixed;left:50%;top:50%;width:min(520px,calc(100% - 48px));max-height:calc(100% - 96px);z-index:21;background:#19191C;border-radius:16px;
+  box-shadow:0 0 0 1px var(--line) inset,0 24px 64px rgba(0,0,0,.55);transform:translate(-50%,-48%);opacity:0;pointer-events:none;
+  transition:transform var(--t2) var(--ease),opacity var(--t2) var(--ease);display:flex;flex-direction:column}
+.sheet.open{transform:translate(-50%,-50%);opacity:1;pointer-events:auto}
 .sheet-on .backdrop{opacity:1;pointer-events:auto}
 .sheet-head{display:flex;align-items:center;height:56px;padding:0 16px 0 20px;flex:none}
 .sheet-head h2{margin:0;font-size:16px;font-weight:600;flex:1}
@@ -340,21 +365,19 @@ main{flex:1;display:grid;grid-template-columns:360px minmax(0,1fr);gap:16px;padd
           </div>
         </div>
 
-        <div class="label lockable">Destino</div>
-        <div class="group lockable">
-          <div class="row" id="rowDate"><label>Data</label><input type="date" id="iDate"></div>
-          <div class="path" id="destPath">…</div>
-          <div class="row free-row"><span id="freeTxt"></span><button class="mini" id="bOpenDest" title="Abrir essa pasta no Explorer">Abrir pasta</button></div>
-        </div>
-        <div class="btns lockable">
-          <button class="btn ghost small" id="bPick">Escolher outra pasta</button>
-          <button class="btn ghost small" id="bAuto" disabled>Usar meu padrão</button>
+        <div class="group lockable" style="margin-top:12px">
+          <div class="row save-row">
+            <div class="save-t"><div class="save-k">Salvar em</div><div class="path" id="destPath">…</div></div>
+            <button class="rv" id="bOpenDest" title="Abrir essa pasta no Explorer"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5a1.5 1.5 0 0 1 1.5-1.5h2.3l1.4 1.7h5.3A1.5 1.5 0 0 1 14 6.7v4.8a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg></button>
+            <button class="link-btn" id="bPick">Alterar</button>
+          </div>
         </div>
 
         <button class="disc lockable" id="bAdv"><svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3.500 1.500L7 5 3.500 8.500"/></svg>Opções avançadas</button>
         <div class="adv lockable" id="adv">
           <div class="group">
-            <div class="row"><label>Subpasta</label><input type="text" id="iSub" placeholder="nenhuma" spellcheck="false"></div>
+            <div class="row"><label>Subpasta no destino</label><input type="text" id="iSub" placeholder="nenhuma" spellcheck="false"></div>
+            <div class="row"><label title="Fica dentro da pasta de cada link, em volta do conteúdo dela">Subpasta dentro da raiz</label><input type="text" id="iInner" placeholder="nenhuma" spellcheck="false"></div>
             <div class="row"><label>Prefixo</label><input type="text" id="iPre" placeholder="nenhum" spellcheck="false"></div>
             <div class="row"><label>Sufixo</label><input type="text" id="iSuf" placeholder="nenhum" spellcheck="false"></div>
           </div>
@@ -362,6 +385,8 @@ main{flex:1;display:grid;grid-template-columns:360px minmax(0,1fr);gap:16px;padd
           <div class="group">
             <div class="row"><label>Manter a pasta raiz do link</label><button class="switch" id="swRoot" aria-label="Manter a pasta raiz do link"></button></div>
             <div class="row"><label>Abrir a pasta ao concluir</label><button class="switch" id="swOpen" aria-label="Abrir a pasta ao concluir"></button></div>
+            <div class="row hide" id="rowEnc"><label title="Os vídeos entram na fila do Mec Encoder e ficam parados até você mandar converter">Adicionar à fila do Mec Encoder ao concluir</label><button class="switch" id="swEnc" aria-label="Adicionar à fila do Mec Encoder ao concluir"></button></div>
+            <div class="row hide" id="rowEncPreset"><label>Predefinição do Mec Encoder</label><select id="selEnc"></select></div>
             <div class="row"><label>Downloads ao mesmo tempo</label>
               <div class="stepper"><button id="bLess">−</button><span id="nTransfers">4</span><button id="bMore">+</button></div></div>
           </div>
@@ -393,6 +418,7 @@ main{flex:1;display:grid;grid-template-columns:360px minmax(0,1fr);gap:16px;padd
           <div class="vseg" id="vSeg">
             <button data-v="details" title="Detalhes (árvore)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2 3.500h5M5 8h9M5 12.500h9M2 8h.01M2 12.500h.01"/></svg></button>
             <button data-v="list" title="Lista"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M2.500 4h11M2.500 8h11M2.500 12h11"/></svg></button>
+            <button data-v="browse" title="Navegar por pastas, como no Drive"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M2 5a1.5 1.5 0 0 1 1.5-1.5h2.3l1.4 1.7h5.3A1.5 1.5 0 0 1 14 6.7v4.8a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/></svg></button>
             <button data-v="grid" title="Grade"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><rect x="2" y="2" width="5" height="5" rx="1"/><rect x="9" y="2" width="5" height="5" rx="1"/><rect x="2" y="9" width="5" height="5" rx="1"/><rect x="9" y="9" width="5" height="5" rx="1"/></svg></button>
           </div>
           <div class="stepper" id="zCtl" title="Tamanho dos itens: role a roda do mouse aqui (ou Ctrl + roda sobre a lista)"><button id="zOut" title="Diminuir">−</button><span id="zLbl">100%</span><button id="zIn" title="Aumentar">+</button></div>
@@ -403,6 +429,7 @@ main{flex:1;display:grid;grid-template-columns:360px minmax(0,1fr);gap:16px;padd
           <h3 id="emptyT">Cole um ou vários links do Google Drive</h3>
           <p id="emptyP">A árvore de pastas aparece aqui com os tamanhos, para você escolher o que baixar. Os nomes e as subpastas ficam exatamente como estão no Drive.</p>
         </div>
+        <div class="tree-foot"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="9" width="12" height="4.500" rx="1.500"/><path d="M3.500 9l1.500-5h6l1.500 5M11.500 11.300h.01"/></svg><span id="freeTxt"></span></div>
       </div>
 
       <div class="card prog" id="prog">
@@ -443,15 +470,7 @@ main{flex:1;display:grid;grid-template-columns:360px minmax(0,1fr);gap:16px;padd
       <div class="row"><label>Conta</label><input type="text" id="accEmail" readonly placeholder="sem login"><button class="mini" id="bAcc">Entrar</button></div>
     </div>
     <div class="caption">Acesso somente leitura. O token fica em <b id="confPath"></b></div>
-    <div class="label">Pasta base do padrão por data</div>
-    <div class="group">
-      <div class="path" id="basePath"></div>
-    </div>
-    <div class="caption">Opcional. Com uma pasta base, o app sugere <b>&lt;ano&gt;\&lt;n&gt;. &lt;MÊS&gt;\&lt;n&gt;. MM-DD-AA\RAW</b> olhando as pastas que já existem. Sem ela, o destino padrão é a pasta de downloads.</div>
-    <div class="btns" style="margin-top:8px">
-      <button class="btn ghost small" id="bBase">Trocar pasta base</button>
-      <button class="btn ghost small" id="bAppDir">Abrir pasta do app</button>
-    </div>
+    <button class="btn ghost small" id="bAppDir" style="margin-top:8px">Abrir pasta do app</button>
   </div>
 </div>
 

@@ -425,6 +425,60 @@ fn open_url(url: String) -> Result<(), String> {
     Command::new("explorer.exe").arg(url).spawn().map(|_| ()).map_err(|e| e.to_string())
 }
 
+// ---- Mec Encoder (opcional): ele observa uma pasta de tarefas. Com "start": false (Mec Encoder 0.3.12+)
+// os arquivos entram na fila e ficam parados, esperando a pessoa mandar converter. ----
+fn mecenc_dir() -> PathBuf {
+    PathBuf::from(std::env::var("APPDATA").unwrap_or_default()).join("com.hugomec.mecencoder")
+}
+fn mecenc_exe() -> PathBuf {
+    PathBuf::from(std::env::var("ProgramFiles").unwrap_or_default()).join("Mec Encoder").join("mec-encoder.exe")
+}
+
+/// Diz se o Mec Encoder está neste PC e quais predefinições de vídeo ele tem.
+#[tauri::command]
+fn mecenc_info() -> Value {
+    let dir = mecenc_dir();
+    let read = |name: &str| fs::read_to_string(dir.join(name)).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+    let all = read("presets.json").and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    let name_of = |p: &Value| p.get("name").and_then(Value::as_str).map(str::to_string);
+    let presets: Vec<String> = all.iter().filter(|p| p.get("kind").and_then(Value::as_str) == Some("video")).filter_map(name_of).collect();
+    // nas configurações do Mec Encoder a predefinição padrão vem pelo id; aqui devolvemos o nome
+    let default_id = read("settings.json").and_then(|v| v.get("defaultPreset").and_then(Value::as_str).map(str::to_string));
+    let default = default_id.and_then(|id| all.iter().find(|p| p.get("id").and_then(Value::as_str) == Some(id.as_str())).and_then(name_of));
+    // versões antigas ignoram "start" e converteriam na hora: só oferecemos a opção se o LEIA-ME da pasta citar o campo
+    let queue_only = fs::read_to_string(dir.join("jobs").join("README.txt")).map(|t| t.contains("\"start\"")).unwrap_or(false);
+    json!({ "installed": dir.join("jobs").is_dir(), "queueOnly": queue_only, "presets": presets, "defaultPreset": default })
+}
+
+/// Coloca os arquivos na fila do Mec Encoder, sem converter, e abre o app se estiver fechado.
+#[tauri::command]
+fn mecenc_send(files: Vec<String>, preset: String) -> Result<String, String> {
+    let jobs = mecenc_dir().join("jobs");
+    if !jobs.is_dir() {
+        return Err("o Mec Encoder não foi encontrado neste PC".to_string());
+    }
+    if files.is_empty() {
+        return Err("nenhum vídeo para enviar".to_string());
+    }
+    let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    let name = format!("mecdrive-{stamp}.json");
+    let body = serde_json::to_vec_pretty(&json!({ "files": files, "preset": preset, "start": false })).map_err(|e| e.to_string())?;
+    // grava com outro nome e renomeia, para o Mec Encoder nunca ler um arquivo pela metade
+    let tmp = jobs.join(format!("{name}.tmp"));
+    fs::write(&tmp, body).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, jobs.join(&name)).map_err(|e| e.to_string())?;
+    let running = Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq mec-encoder.exe", "/NH"])
+        .creation_flags(NO_WINDOW)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_lowercase().contains("mec-encoder.exe"))
+        .unwrap_or(false);
+    if !running && mecenc_exe().exists() {
+        let _ = Command::new(mecenc_exe()).spawn();
+    }
+    Ok(name)
+}
+
 #[tauri::command]
 fn notify(app: AppHandle, title: String, body: String) {
     let _ = app.notification().builder().title(title).body(body).show();
@@ -474,6 +528,8 @@ fn main() {
             reveal,
             check_update,
             open_url,
+            mecenc_info,
+            mecenc_send,
             notify,
             alerta
         ])
