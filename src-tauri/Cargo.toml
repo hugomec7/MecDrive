@@ -1,0 +1,31 @@
+[package]
+name = "mecdrive"
+version = "1.0.0"
+edition = "2021"
+description = "Baixa pastas do Google Drive exatamente como estão"
+default-run = "mecdrive"
+
+[[bin]]
+name = "mecdrive"
+path = "src/main.rs"
+
+[[bin]]
+name = "mecdrive-cli"
+path = "src/bin/mecdrive-cli.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["custom-protocol"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ureq = { version = "2", features = ["json"] }
+base64 = "0.22"
+
+[profile.release]
+strip = true
+opt-level = "s"
